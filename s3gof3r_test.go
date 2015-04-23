@@ -472,7 +472,7 @@ func TestGetterAfterError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, ok := r.(*getter)
+	g, ok := r.(*singleGetter)
 	if !ok {
 		t.Fatal("getter type cast failed")
 	}

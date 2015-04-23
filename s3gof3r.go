@@ -78,6 +78,28 @@ func (s3 *S3) Bucket(name string) *Bucket {
 	}
 }
 
+//GetMultiple will download multiple files in chunks using a number of
+//workers defined in Config.
+func (b *Bucket) GetMultiple(c *Config, files []string) (chan *Chunk) {
+
+	if c == nil {
+		c = b.conf()
+	}
+
+	batchGetter := newBatchGetter(c, b)
+
+	go func(){
+		for _, file := range files {
+			batchGetter.queueFile(file)
+		}
+		close(batchGetter.getCh)
+		batchGetter.wg.Wait()
+		close(batchGetter.readCh)
+	}()
+
+	return batchGetter.readCh
+}
+
 // GetReader provides a reader and downloads data using parallel ranged get requests.
 // Data from the requests are ordered and written sequentially.
 //
