@@ -79,7 +79,9 @@ func (s3 *S3) Bucket(name string) *Bucket {
 }
 
 //GetMultiple will download multiple files in chunks using a number of
-//workers defined in Config.
+//workers defined in Config. This method returns a channel to receive chunks as they are completed. Chunks can
+//(and likely will) be returned out of order.
+// DefaultConfig is used if c is nil
 func (b *Bucket) GetMultiple(c *Config, files []string) (chan *Chunk) {
 
 	if c == nil {

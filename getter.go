@@ -44,9 +44,9 @@ type getter struct {
 
 type singleGetter struct {
 	getter
-	url   url.URL
+	url        url.URL
 	contentLen int64
-	qWait  map[int]*Chunk
+	qWait      map[int]*Chunk
 }
 
 //New struct to hold methods that only make sense for multi-file downloads
@@ -55,28 +55,27 @@ type batchGetter struct {
 }
 
 type Chunk struct {
-	Id     int
-	header http.Header
-	Start  int64
-	ChunkSize   int64
-	FileSize int64
+	Id         int // The chunk number for the file being retrieved
+	Start      int64 // The position in the requested file at which this chunk's data begins
+	ChunkSize  int64 // Number of bytes contained in this chunk
+	FileSize   int64 // Total size of the requested file
+	Bytes      []byte // The bytes retrieved from S3. Length is set by cfg.PartSize, but only contains ChunkSize bytes
+	Path       string // S3 file path this chunk comes from
+	header     http.Header
 	chunkTotal int64
-	Bytes      []byte
-	response      *http.Response
-	url    url.URL
-	Path   string
-	Filename string
+	response   *http.Response
+	url        url.URL
 }
 
-func newBatchGetter(c *Config, b *Bucket) (*batchGetter){
+func newBatchGetter(c *Config, b *Bucket) *batchGetter {
 	g := new(batchGetter)
 	g.c = c
 	g.bufsz = max64(c.PartSize, 1)
 	g.c.NTry = max(c.NTry, 1)
 	g.c.Concurrency = max(c.Concurrency, 1)
 
-	g.getCh = make(chan *Chunk, 2 * c.Concurrency)
-	g.readCh = make(chan *Chunk, 2 * c.Concurrency)
+	g.getCh = make(chan *Chunk, 2*c.Concurrency)
+	g.readCh = make(chan *Chunk, 2*c.Concurrency)
 	g.quit = make(chan struct{})
 	g.b = b
 	g.md5 = md5.New()
@@ -154,7 +153,7 @@ func (g *getter) retryRequest(method, urlStr string, body io.ReadSeeker) (resp *
 	return
 }
 
-func (bg *batchGetter) queueFile(path string){
+func (bg *batchGetter) queueFile(path string) {
 
 	url, err := bg.b.url(path, bg.c)
 
@@ -172,7 +171,7 @@ func (bg *batchGetter) queueFile(path string){
 	// Golang changes content-length to -1 when chunked transfer encoding / EOF close response detected
 	if resp.ContentLength == -1 {
 		fmt.Println(fmt.Errorf("Retrieving objects with undefined content-length " +
-		" responses (chunked transfer encoding / EOF close) is not supported"))
+			" responses (chunked transfer encoding / EOF close) is not supported"))
 		return
 	}
 
@@ -188,14 +187,14 @@ func (bg *batchGetter) initChunks(resp *http.Response, path string) {
 			Id: id,
 			header: http.Header{
 				"Range": {fmt.Sprintf("bytes=%d-%d",
-				i, i+size-1)},
+					i, i+size-1)},
 			},
-			Start: i,
-			ChunkSize:  size,
+			Start:     i,
+			ChunkSize: size,
 			Bytes:     nil,
-			url:   *resp.Request.URL,
-			Path: path,
-			FileSize: resp.ContentLength,
+			url:       *resp.Request.URL,
+			Path:      path,
+			FileSize:  resp.ContentLength,
 		}
 
 		//Re-use the response for the first chunk

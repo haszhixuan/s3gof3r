@@ -302,6 +302,64 @@ func ExampleBucket_PutWriter() error {
 	return nil
 }
 
+func ExampleBucket_GetMultiple() {
+    k, err := EnvKeys() // get S3 keys from environment
+    if err != nil {
+        return
+    }
+
+    // Open bucket
+    s3 := New("", k)
+    s3bucket := s3.Bucket("bucketName")
+
+    //Start multi-file download
+    chunkChannel := s3bucket.GetMultiple(DefaultConfig, []string{"fileA", "fileB"})
+    fileWriterMap := make(map[string]*os.File)
+
+    //Files are downloaded in chunks, served through chunkChannel
+    for chunk := range chunkChannel {
+        fileWriter, present := fileWriterMap[chunk.Path]
+        if !present {
+            fileWriter, _ = os.Create(chunk.Path)
+            fileWriterMap[chunk.Path] = fileWriter
+        }
+        //Chunks can be received out of order. Use fields 'ChunkSize' and 'Start' to determine where to write this one
+        fileWriter.WriteAt(chunk.Bytes[:chunk.ChunkSize], chunk.Start)
+    }
+}
+
+//This example shows downloading multiple files into one concatenated file, useful for example in combining CSVs
+func ExampleBucket_GetMultiple_concatenated() {
+
+    k, err := EnvKeys() // get S3 keys from environment
+    if err != nil {
+        return
+    }
+
+    // Open bucket
+    s3 := New("", k)
+    s3bucket := s3.Bucket("bucketName")
+
+    //Start multi-file download
+    chunkChannel := s3bucket.GetMultiple(DefaultConfig, []string{"fileA", "fileB"})
+
+    destFile, _ := os.Create("concatenated_file")
+    fileOffsetMap := make(map[string]int64)//Keep track of file positions in our concatenated file
+    concatFilePosition := int64(0)
+
+    //Files are downloaded in chunks, served through chunkChannel
+    for chunk := range chunkChannel {
+        fileOffset, present := fileOffsetMap[chunk.Path]
+        if !present {
+            fileOffset = concatFilePosition
+            fileOffsetMap[chunk.Path] = concatFilePosition
+            concatFilePosition += chunk.FileSize
+        }
+        //Chunks can be received out of order. Use fields 'ChunkSize' and 'Start' to determine where to write this one
+        destFile.WriteAt(chunk.Bytes[:chunk.ChunkSize], fileOffset + chunk.Start)
+    }
+}
+
 func ExampleBucket_GetReader() error {
 
 	k, err := EnvKeys() // get S3 keys from environment
