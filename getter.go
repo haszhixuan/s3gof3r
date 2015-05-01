@@ -61,6 +61,7 @@ type Chunk struct {
 	FileSize   int64 // Total size of the requested file
 	Bytes      []byte // The bytes retrieved from S3. Length is set by cfg.PartSize, but only contains ChunkSize bytes
 	Path       string // S3 file path this chunk comes from
+	Error      error // contains the error that occurred, if any, while retrieving this chunk
 	header     http.Header
 	chunkTotal int64
 	response   *http.Response
@@ -153,30 +154,27 @@ func (g *getter) retryRequest(method, urlStr string, body io.ReadSeeker) (resp *
 	return
 }
 
-func (bg *batchGetter) queueFile(path string) {
-
+func (bg *batchGetter) queueFile(path string) error {
 	url, err := bg.b.url(path, bg.c)
 
 	resp, err := bg.retryRequest("GET", url.String(), nil)
 	if err != nil {
-		fmt.Println("Error in initial request")
-		return
+		return err
 	}
 
 	if resp.StatusCode != 200 {
-		fmt.Println("Bad status for HTTP response:", resp.StatusCode)
-		return
+		return fmt.Errorf("Bad status for HTTP response: %d", resp.StatusCode)
 	}
 
 	// Golang changes content-length to -1 when chunked transfer encoding / EOF close response detected
 	if resp.ContentLength == -1 {
-		fmt.Println(fmt.Errorf("Retrieving objects with undefined content-length " +
-			" responses (chunked transfer encoding / EOF close) is not supported"))
-		return
+		return fmt.Errorf("Retrieving objects with undefined content-length " +
+			" responses (chunked transfer encoding / EOF close) is not supported")
 	}
 
 	logger.debugPrintf("object size: %3.2g MB", float64(resp.ContentLength)/float64((1*mb)))
 	bg.initChunks(resp, path)
+	return nil
 }
 
 func (bg *batchGetter) initChunks(resp *http.Response, path string) {
@@ -263,6 +261,8 @@ func (g *getter) retryGetChunk(c *Chunk) {
 		c.response = nil
 	}
 	g.err = err
+	c.Error = err
+	g.readCh <- c //expose error to the chunk handler
 	close(g.quit) // out of tries, ensure quit by closing channel
 }
 

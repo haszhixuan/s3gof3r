@@ -318,6 +318,9 @@ func ExampleBucket_GetMultiple() {
 
     //Files are downloaded in chunks, served through chunkChannel
     for chunk := range chunkChannel {
+        if chunk.Error != nil {
+            panic(chunk.Error.Error()) //We were unable to download this chunk
+        }
         fileWriter, present := fileWriterMap[chunk.Path]
         if !present {
             fileWriter, _ = os.Create(chunk.Path)
@@ -349,6 +352,9 @@ func ExampleBucket_GetMultiple_concatenated() {
 
     //Files are downloaded in chunks, served through chunkChannel
     for chunk := range chunkChannel {
+        if chunk.Error != nil {
+			panic(chunk.Error.Error()) //We were unable to download this chunk
+        }
         fileOffset, present := fileOffsetMap[chunk.Path]
         if !present {
             fileOffset = concatFilePosition

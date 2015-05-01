@@ -92,7 +92,13 @@ func (b *Bucket) GetMultiple(c *Config, files []string) (chan *Chunk) {
 
 	go func(){
 		for _, file := range files {
-			batchGetter.queueFile(file)
+			err := batchGetter.queueFile(file)
+			if err != nil {
+				batchGetter.readCh <- &Chunk{
+					Path: file,
+					Error: err,
+				}
+			}
 		}
 		close(batchGetter.getCh)
 		batchGetter.wg.Wait()
