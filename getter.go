@@ -81,7 +81,7 @@ func newBatchGetter(c *Config, b *Bucket) *batchGetter {
 	g.b = b
 	g.md5 = md5.New()
 
-	g.sp = bufferPool(g.bufsz)
+	//g.sp = bufferPool(g.bufsz)
 
 	for i := 0; i < g.c.Concurrency; i++ {
 		go g.worker()
@@ -189,7 +189,7 @@ func (bg *batchGetter) initChunks(resp *http.Response, path string) {
 			},
 			Start:     i,
 			ChunkSize: size,
-			Bytes:     nil,
+			Bytes:     make([]byte, bg.bufsz),
 			url:       *resp.Request.URL,
 			Path:      path,
 			FileSize:  resp.ContentLength,
@@ -249,7 +249,11 @@ func (g *getter) worker() {
 func (g *getter) retryGetChunk(c *Chunk) {
 	defer g.wg.Done()
 	var err error
-	c.Bytes = <-g.sp.get
+
+	if c.Bytes == nil {
+		c.Bytes = <-g.sp.get
+	}
+
 	for i := 0; i < g.c.NTry; i++ {
 		time.Sleep(time.Duration(math.Exp2(float64(i))) * 100 * time.Millisecond) // exponential back-off
 		err = g.getChunk(c)
