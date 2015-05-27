@@ -28,6 +28,8 @@ type getter struct {
 	rChunk     *Chunk
 	bytesRead  int64
 	chunkTotal int
+	chunkCounter int
+	chunkWg sync.WaitGroup
 
 	readCh chan *Chunk
 	getCh  chan *Chunk
@@ -40,13 +42,14 @@ type getter struct {
 
 	md5  hash.Hash
 	cIdx int64
+	contentLen int64
+	qWait      map[int]*Chunk
+	url        url.URL
 }
 
 type singleGetter struct {
 	getter
-	url        url.URL
-	contentLen int64
-	qWait      map[int]*Chunk
+
 }
 
 //New struct to hold methods that only make sense for multi-file downloads
@@ -80,8 +83,12 @@ func newBatchGetter(c *Config, b *Bucket) *batchGetter {
 	g.quit = make(chan struct{})
 	g.b = b
 	g.md5 = md5.New()
+	g.chunkTotal = 0
+	g.chunkCounter = 0
+	g.qWait = make(map[int]*Chunk)
 
-	//g.sp = bufferPool(g.bufsz)
+
+	g.sp = bufferPool(g.bufsz)
 
 	for i := 0; i < g.c.Concurrency; i++ {
 		go g.worker()
@@ -97,8 +104,8 @@ func newGetter(getURL url.URL, c *Config, b *Bucket) (io.ReadCloser, http.Header
 	g.c.NTry = max(c.NTry, 1)
 	g.c.Concurrency = max(c.Concurrency, 1)
 
-	g.getCh = make(chan *Chunk)
-	g.readCh = make(chan *Chunk)
+	g.getCh = make(chan *Chunk, c.Concurrency)
+	g.readCh = make(chan *Chunk, c.Concurrency)
 	g.quit = make(chan struct{})
 	g.qWait = make(map[int]*Chunk)
 	g.b = b
@@ -154,8 +161,7 @@ func (g *getter) retryRequest(method, urlStr string, body io.ReadSeeker) (resp *
 	return
 }
 
-func (bg *batchGetter) queueFile(path string) error {
-	url, err := bg.b.url(path, bg.c)
+func (bg *batchGetter) queueFile(url *url.URL) error {
 
 	resp, err := bg.retryRequest("GET", url.String(), nil)
 	if err != nil {
@@ -172,24 +178,26 @@ func (bg *batchGetter) queueFile(path string) error {
 			" responses (chunked transfer encoding / EOF close) is not supported")
 	}
 
+	bg.contentLen += resp.ContentLength
+	bg.chunkTotal += int((resp.ContentLength + bg.bufsz - 1) / bg.bufsz) // round up, integer division
+
 	logger.debugPrintf("object size: %3.2g MB", float64(resp.ContentLength)/float64((1*mb)))
-	bg.initChunks(resp, path)
+	go bg.initChunks(resp, url.String())
 	return nil
 }
 
 func (bg *batchGetter) initChunks(resp *http.Response, path string) {
-	id := 0
 	for i := int64(0); i < resp.ContentLength; {
 		size := min64(bg.bufsz, resp.ContentLength-i)
 		c := &Chunk{
-			Id: id,
+			Id: bg.chunkCounter,
 			header: http.Header{
 				"Range": {fmt.Sprintf("bytes=%d-%d",
 					i, i+size-1)},
 			},
 			Start:     i,
 			ChunkSize: size,
-			Bytes:     make([]byte, bg.bufsz),
+			Bytes:     nil,
 			url:       *resp.Request.URL,
 			Path:      path,
 			FileSize:  resp.ContentLength,
@@ -200,10 +208,11 @@ func (bg *batchGetter) initChunks(resp *http.Response, path string) {
 			c.response = resp
 		}
 		i += size
-		id++
+		bg.chunkCounter++
 		bg.wg.Add(1)
 		bg.getCh <- c
 	}
+	bg.chunkWg.Done()
 }
 
 
@@ -250,9 +259,7 @@ func (g *getter) retryGetChunk(c *Chunk) {
 	defer g.wg.Done()
 	var err error
 
-	if c.Bytes == nil {
-		c.Bytes = <-g.sp.get
-	}
+	c.Bytes = <-g.sp.get
 
 	for i := 0; i < g.c.NTry; i++ {
 		time.Sleep(time.Duration(math.Exp2(float64(i))) * 100 * time.Millisecond) // exponential back-off
@@ -309,7 +316,7 @@ func (g *getter) getChunk(c *Chunk) error {
 	return nil
 }
 
-func (g *singleGetter) Read(p []byte) (int, error) {
+func (g *getter) Read(p []byte) (int, error) {
 	var err error
 	if g.closed {
 		return 0, syscall.EINVAL
@@ -357,7 +364,94 @@ func (g *singleGetter) Read(p []byte) (int, error) {
 
 }
 
-func (g *singleGetter) nextChunk() (*Chunk, error) {
+func (g *batchGetter) WriteToWriterAt(w io.WriterAt) (int, error){
+	fileOffsetMap := make(map[string]int64)
+	filePosition := int64(0)
+	totalWritten := int(0)
+
+	for chunk := range g.readCh {
+		fileOffset, present := fileOffsetMap[chunk.Path]
+		if !present {
+			fileOffset = filePosition
+			fileOffsetMap[chunk.Path] = filePosition
+			filePosition += chunk.FileSize
+		}
+
+		var chunkWritten int = 0
+		for (int64(chunkWritten) < chunk.ChunkSize){
+			n, err := w.WriteAt(chunk.Bytes[:chunk.ChunkSize], fileOffset + chunk.Start)
+			chunkWritten += n
+			totalWritten += n
+			if err != nil {
+				return totalWritten, err
+			}
+		}
+
+		g.sp.give <- chunk.Bytes
+	}
+	return totalWritten, nil
+}
+
+func (g *batchGetter) WriteTo(w io.Writer) (int64, error) {
+	// use WriteAt if present so chunks can be written out of order and release memory faster
+	if wa, ok := w.(io.WriterAt); ok {
+		nw, err := g.WriteToWriterAt(wa)
+		return int64(nw), err
+	}
+
+	var err error
+	if g.closed {
+		return 0, syscall.EINVAL
+	}
+	if g.err != nil {
+		return 0, g.err
+	}
+	nw := int64(0)
+
+	for g.chunkID < g.chunkTotal {
+		if g.bytesRead == g.contentLen {
+			return nw, io.EOF
+		} else if g.bytesRead > g.contentLen {
+			// Here for robustness / completeness
+			// Should not occur as golang uses LimitedReader up to content-length
+			return nw, fmt.Errorf("Expected %d bytes, received %d (too many bytes)",
+				g.contentLen, g.bytesRead)
+		}
+
+		// If for some reason no more chunks to be read and bytes are off, error, incomplete result
+		if g.chunkID >= g.chunkTotal {
+			return nw, fmt.Errorf("Expected %d bytes, received %d and chunkID %d >= chunkTotal %d (no more chunks remaining)",
+				g.contentLen, g.bytesRead, g.chunkID, g.chunkTotal)
+		}
+
+		if g.rChunk == nil {
+			g.rChunk, err = g.nextChunk()
+			if err != nil {
+				return 0, err
+			}
+			g.cIdx = 0
+		}
+
+		n, writeError := w.Write(g.rChunk.Bytes[g.cIdx:g.rChunk.ChunkSize])
+		g.cIdx += int64(n)
+		nw += int64(n)
+		g.bytesRead += int64(n)
+
+		if writeError != nil {
+			return nw, err
+		}
+
+		if g.cIdx >= g.rChunk.ChunkSize { // chunk complete
+			g.sp.give <- g.rChunk.Bytes
+			g.chunkID++
+			g.rChunk = nil
+		}
+	}
+	return nw, nil
+
+}
+
+func (g *getter) nextChunk() (*Chunk, error) {
 	for {
 
 		// first check qWait
@@ -381,7 +475,7 @@ func (g *singleGetter) nextChunk() (*Chunk, error) {
 	}
 }
 
-func (g *singleGetter) Close() error {
+func (g *getter) Close() error {
 	if g.closed {
 		return syscall.EINVAL
 	}
@@ -402,7 +496,7 @@ func (g *singleGetter) Close() error {
 	return nil
 }
 
-func (g *singleGetter) checkMd5() (err error) {
+func (g *getter) checkMd5() (err error) {
 	calcMd5 := fmt.Sprintf("%x", g.md5.Sum(nil))
 	md5Path := fmt.Sprint(".md5", g.url.Path, ".md5")
 	md5Url, err := g.b.url(md5Path, g.c)

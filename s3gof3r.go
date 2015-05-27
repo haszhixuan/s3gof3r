@@ -82,7 +82,7 @@ func (s3 *S3) Bucket(name string) *Bucket {
 //workers defined in Config. This method returns a channel to receive chunks as they are completed. Chunks can
 //(and likely will) be returned out of order.
 // DefaultConfig is used if c is nil
-func (b *Bucket) GetMultiple(c *Config, files []string) (chan *Chunk) {
+func (b *Bucket) GetMultiple(c *Config, files []string) (*batchGetter, error) {
 
 	if c == nil {
 		c = b.conf()
@@ -90,22 +90,26 @@ func (b *Bucket) GetMultiple(c *Config, files []string) (chan *Chunk) {
 
 	batchGetter := newBatchGetter(c, b)
 
-	go func(){
-		for _, file := range files {
-			err := batchGetter.queueFile(file)
-			if err != nil {
-				batchGetter.readCh <- &Chunk{
-					Path: file,
-					Error: err,
-				}
-			}
+	for _, file := range files {
+		u, err := b.url(file, c)
+		if err != nil {
+			return nil, err
 		}
+		batchGetter.chunkWg.Add(1)
+		err = batchGetter.queueFile(u)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	go func(){
+		batchGetter.chunkWg.Wait()
 		close(batchGetter.getCh)
 		batchGetter.wg.Wait()
 		close(batchGetter.readCh)
 	}()
 
-	return batchGetter.readCh
+	return batchGetter, nil
 }
 
 // GetReader provides a reader and downloads data using parallel ranged get requests.
