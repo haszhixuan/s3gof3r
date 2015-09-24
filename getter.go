@@ -112,12 +112,13 @@ func (g *getter) retryRequest(method, urlStr string, body io.ReadSeeker) (resp *
 		req, err = http.NewRequest(method, urlStr, body)
 		if err != nil {
 			logger.debugPrintf("NewRequest error on attempt %d: retrying url: %s, error: %s", i, urlStr, err)
-			continue // let retry
+			return
 		}
 		g.b.Sign(req)
 		resp, err = g.c.Client.Do(req)
 
-		// OK status
+		// This is a completely successful request. We check for non error, non nil respond and OK status code.
+		// return without retrying.
 		if err == nil && resp != nil && resp.StatusCode == 200 {
 			return
 		}
@@ -142,6 +143,9 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 	// resp could be nil, depending on the error.
 	if err != nil {
 		logger.debugPrintf("ERROR on queueFile", errgo.Mask(err))
+		if resp != nil {
+			return resp.Header, err
+		}
 		return nil, err
 	}
 
