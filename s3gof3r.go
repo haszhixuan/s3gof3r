@@ -5,6 +5,7 @@ package s3gof3r
 import (
 	"errors"
 	"fmt"
+	"github.com/juju/errgo"
 	"io"
 	"io/ioutil"
 	"log"
@@ -45,7 +46,7 @@ type Config struct {
 var DefaultConfig = &Config{
 	Concurrency: 10,
 	PartSize:    20 * mb,
-	NTry:        10,
+	NTry:        20,
 	Md5Check:    true,
 	Scheme:      "https",
 	Client:      ClientWithTimeout(clientTimeout),
@@ -93,15 +94,17 @@ func (b *Bucket) GetMultiple(c *Config, files []string) (*getter, error) {
 	for _, file := range files {
 		u, err := b.url(file, c)
 		if err != nil {
+			logger.Printf("GetMultiple ERROR ON", b, "WITH FILE", file, errgo.Mask(err))
 			return nil, err
 		}
 		_, err = batchGetter.queueFile(u)
 		if err != nil {
+			log.Println("GetMultiple ERROR ON", b, "WITH FILE", file, errgo.Mask(err))
 			return nil, err
 		}
 	}
 
-	go func(){
+	go func() {
 		batchGetter.chunkWg.Wait()
 		close(batchGetter.getCh)
 		batchGetter.wg.Wait()

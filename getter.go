@@ -3,6 +3,7 @@ package s3gof3r
 import (
 	"crypto/md5"
 	"fmt"
+	"github.com/juju/errgo"
 	"hash"
 	"io"
 	"io/ioutil"
@@ -25,13 +26,13 @@ type getter struct {
 	err   error
 	wg    sync.WaitGroup
 
-	chunkID    int
-	rChunk     *chunk
-	contentLen int64
-	bytesRead  int64
-	chunkTotal int
+	chunkID      int
+	rChunk       *chunk
+	contentLen   int64
+	bytesRead    int64
+	chunkTotal   int
 	chunkCounter int
-	chunkWg sync.WaitGroup
+	chunkWg      sync.WaitGroup
 
 	readCh chan *chunk
 	getCh  chan *chunk
@@ -45,23 +46,22 @@ type getter struct {
 
 	md5  hash.Hash
 	cIdx int64
-
 }
 
 type chunk struct {
-	id int // The chunk number for the file being retrieved
-	start int64 // The position in the requested file at which this chunk's data begins
-	size int64 // Number of bytes contained in this chunk
-	fileSize int64 // Total size of the requested file
-	b []byte // The bytes retrieved from S3. Length is set by cfg.PartSize, but only contains ChunkSize bytes
-	path string // S3 file path this chunk comes from
-	error error // contains the error that occurred, if any, while retrieving this chunk
-	header     http.Header
-	response   *http.Response
-	url        url.URL
+	id       int    // The chunk number for the file being retrieved
+	start    int64  // The position in the requested file at which this chunk's data begins
+	size     int64  // Number of bytes contained in this chunk
+	fileSize int64  // Total size of the requested file
+	b        []byte // The bytes retrieved from S3. Length is set by cfg.PartSize, but only contains ChunkSize bytes
+	path     string // S3 file path this chunk comes from
+	error    error  // contains the error that occurred, if any, while retrieving this chunk
+	header   http.Header
+	response *http.Response
+	url      url.URL
 }
 
-func newBatchGetter( c *Config, b *Bucket) (*getter, error) {
+func newBatchGetter(c *Config, b *Bucket) (*getter, error) {
 	g := new(getter)
 	g.c = c
 	g.bufsz = max64(c.PartSize, 1)
@@ -76,7 +76,6 @@ func newBatchGetter( c *Config, b *Bucket) (*getter, error) {
 	g.md5 = md5.New()
 	g.chunkTotal = 0
 	g.chunkCounter = 0
-
 
 	g.sp = bufferPool(g.bufsz)
 
@@ -96,7 +95,7 @@ func newGetter(getURL url.URL, c *Config, b *Bucket) (io.ReadCloser, http.Header
 
 	header, err := g.queueFile(&getURL)
 
-	go func(){
+	go func() {
 		g.chunkWg.Wait()
 		close(g.getCh)
 		g.wg.Wait()
@@ -108,19 +107,27 @@ func newGetter(getURL url.URL, c *Config, b *Bucket) (io.ReadCloser, http.Header
 
 func (g *getter) retryRequest(method, urlStr string, body io.ReadSeeker) (resp *http.Response, err error) {
 	for i := 0; i < g.c.NTry; i++ {
+		time.Sleep(time.Duration(math.Exp2(float64(i))) * 100 * time.Millisecond) // exponential back-off
 		var req *http.Request
 		req, err = http.NewRequest(method, urlStr, body)
 		if err != nil {
+			logger.debugPrintf("NewRequest error on attempt %d: retrying url: %s, error: %s", i, urlStr, err)
 			return
 		}
 		g.b.Sign(req)
 		resp, err = g.c.Client.Do(req)
-		if err == nil {
+
+		// This is a completely successful request. We check for non error, non nil respond and OK status code.
+		// return without retrying.
+		if err == nil && resp != nil && resp.StatusCode == 200 {
 			return
 		}
-		logger.debugPrintln(err)
+
+		logger.debugPrintf("Client error on attempt %d: retrying url: %s, error: %s", i, urlStr, err)
+
 		if body != nil {
 			if _, err = body.Seek(0, 0); err != nil {
+				logger.debugPrintf("retryRequest body ERROR", errgo.Mask(err))
 				return
 			}
 		}
@@ -132,11 +139,18 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 
 	g.chunkWg.Add(1)
 	resp, err := g.retryRequest("GET", url.String(), nil)
+
+	// resp could be nil, depending on the error.
 	if err != nil {
-		return resp.Header, err
+		logger.debugPrintf("ERROR on queueFile", errgo.Mask(err))
+		if resp != nil {
+			return resp.Header, err
+		}
+		return nil, err
 	}
 
 	if resp.StatusCode != 200 {
+		logger.debugPrintf("ERROR on queueFile", url.String(), "Header", resp.Header)
 		return resp.Header, fmt.Errorf("Bad status for HTTP response: %d", resp.StatusCode)
 	}
 
@@ -167,12 +181,12 @@ func (g *getter) initChunks(resp *http.Response, path string) {
 				"Range": {fmt.Sprintf("bytes=%d-%d",
 					i, i+size-1)},
 			},
-			start:     i,
-			size:	   size,
-			b:         nil,
-			url:       *resp.Request.URL,
-			path:      path,
-			fileSize:  resp.ContentLength,
+			start:    i,
+			size:     size,
+			b:        nil,
+			url:      *resp.Request.URL,
+			path:     path,
+			fileSize: resp.ContentLength,
 		}
 
 		//Re-use the response for the first chunk
@@ -249,7 +263,7 @@ func (g *getter) getChunk(c *chunk) error {
 	}
 	if int64(n) != c.size {
 		return fmt.Errorf("chunk %d: Expected %d bytes, received %d",
-				c.id, c.size, n)
+			c.id, c.size, n)
 	}
 	g.readCh <- c
 	return nil
@@ -303,7 +317,7 @@ func (g *getter) Read(p []byte) (int, error) {
 
 }
 
-func (g *getter) WriteToWriterAt(w io.WriterAt) (int, error){
+func (g *getter) WriteToWriterAt(w io.WriterAt) (int, error) {
 	fileOffsetMap := make(map[string]int64)
 	filePosition := int64(0)
 	totalWritten := int(0)
@@ -317,8 +331,8 @@ func (g *getter) WriteToWriterAt(w io.WriterAt) (int, error){
 		}
 
 		var chunkWritten int = 0
-		for (int64(chunkWritten) < chunk.size){
-			n, err := w.WriteAt(chunk.b[:chunk.size], fileOffset + chunk.start)
+		for int64(chunkWritten) < chunk.size {
+			n, err := w.WriteAt(chunk.b[:chunk.size], fileOffset+chunk.start)
 			chunkWritten += n
 			totalWritten += n
 			if err != nil {
