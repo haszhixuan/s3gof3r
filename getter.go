@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"sync/atomic"
 )
 
 const (
@@ -26,18 +27,18 @@ type getter struct {
 	err   error
 	wg    sync.WaitGroup
 
-	chunkID      int
+	chunkID      int64
 	rChunk       *chunk
 	contentLen   int64
 	bytesRead    int64
-	chunkTotal   int
-	chunkCounter int
+	chunkTotal   int64
+	chunkCounter int64
 	chunkWg      sync.WaitGroup
 
 	readCh chan *chunk
 	getCh  chan *chunk
 	quit   chan struct{}
-	qWait  map[int]*chunk
+	qWait  map[int64]*chunk
 
 	sp *bp
 
@@ -49,7 +50,7 @@ type getter struct {
 }
 
 type chunk struct {
-	id       int    // The chunk number for the file being retrieved
+	id       int64    // The chunk number for the file being retrieved
 	start    int64  // The position in the requested file at which this chunk's data begins
 	size     int64  // Number of bytes contained in this chunk
 	fileSize int64  // Total size of the requested file
@@ -71,7 +72,7 @@ func newBatchGetter(c *Config, b *Bucket) (*getter, error) {
 	g.getCh = make(chan *chunk, c.Concurrency)
 	g.readCh = make(chan *chunk, c.Concurrency)
 	g.quit = make(chan struct{})
-	g.qWait = make(map[int]*chunk)
+	g.qWait = make(map[int64]*chunk)
 	g.b = b
 	g.md5 = md5.New()
 	g.chunkTotal = 0
@@ -160,8 +161,8 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 			" responses (chunked transfer encoding / EOF close) is not supported")
 	}
 
-	g.contentLen += resp.ContentLength
-	g.chunkTotal += int((resp.ContentLength + g.bufsz - 1) / g.bufsz) // round up, integer division
+	atomic.AddInt64(&g.contentLen, resp.ContentLength)
+	atomic.AddInt64(&g.chunkTotal, int64((resp.ContentLength + g.bufsz - 1) / g.bufsz))// round up, integer division
 
 	logger.debugPrintf("object size: %3.2g MB", float64(resp.ContentLength)/float64((1*mb)))
 	go g.initChunks(resp, url.String())
@@ -176,7 +177,7 @@ func (g *getter) initChunks(resp *http.Response, path string) {
 		}
 		size := min64(g.bufsz, resp.ContentLength-i)
 		c := &chunk{
-			id: g.chunkCounter,
+			id: atomic.LoadInt64(&g.chunkCounter),
 			header: http.Header{
 				"Range": {fmt.Sprintf("bytes=%d-%d",
 					i, i+size-1)},
@@ -194,7 +195,7 @@ func (g *getter) initChunks(resp *http.Response, path string) {
 			c.response = resp
 		}
 		i += size
-		g.chunkCounter++
+		atomic.AddInt64(&g.chunkCounter, 1)
 		g.wg.Add(1)
 		g.getCh <- c
 	}
@@ -215,7 +216,9 @@ func (g *getter) retryGetChunk(c *chunk) {
 	c.b = <-g.sp.get
 
 	for i := 0; i < g.c.NTry; i++ {
-		time.Sleep(time.Duration(math.Exp2(float64(i))) * 100 * time.Millisecond) // exponential back-off
+		if i > 0 {
+			time.Sleep(time.Duration(math.Exp2(float64(i))) * 100 * time.Millisecond) // exponential back-off
+		}
 		err = g.getChunk(c)
 		if err == nil {
 			return
