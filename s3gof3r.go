@@ -14,6 +14,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"sync"
 )
 
 // S3 contains the domain or endpoint of an S3-compatible service and
@@ -46,7 +47,7 @@ type Config struct {
 var DefaultConfig = &Config{
 	Concurrency: 10,
 	PartSize:    20 * mb,
-	NTry:        20,
+	NTry:        10,
 	Md5Check:    true,
 	Scheme:      "https",
 	Client:      ClientWithTimeout(clientTimeout),
@@ -89,19 +90,58 @@ func (b *Bucket) GetMultiple(c *Config, files []string) (*getter, error) {
 		c = b.conf()
 	}
 
+	errCh := make(chan error)
+	fileCh := make(chan string)
+	wg := &sync.WaitGroup{}
 	batchGetter, err := newBatchGetter(c, b)
+	if err != nil {
+		return nil, err
+	}
+	var errorSlice []error
 
-	for _, file := range files {
-		u, err := b.url(file, c)
-		if err != nil {
-			logger.Printf("GetMultiple ERROR ON", b, "WITH FILE", file, errgo.Mask(err))
-			return nil, err
+	for i:=0; i < c.Concurrency; i++{
+		wg.Add(1)
+		go func() {
+			for file := range fileCh {
+				u, err := b.url(file, c)
+				if err != nil {
+					logger.Printf("GetMultiple ERROR ON", b, "WITH FILE", file, errgo.Mask(err))
+					errCh <- err
+				}
+
+				_, err = batchGetter.queueFile(u)
+				if err != nil {
+					log.Println("GetMultiple ERROR ON", b, "WITH FILE", file, errgo.Mask(err))
+					errCh <- err
+				}
+			}
+			wg.Done()
+		}()
+	}
+
+	go func() {
+		for _, file := range files {
+			fileCh <- file
 		}
-		_, err = batchGetter.queueFile(u)
-		if err != nil {
-			log.Println("GetMultiple ERROR ON", b, "WITH FILE", file, errgo.Mask(err))
-			return nil, err
+		close(fileCh)
+	}()
+
+
+	go func () {
+		for err := range errCh {
+			errorSlice = append(errorSlice, err)
 		}
+	}()
+	wg.Wait()
+	close(errCh)
+
+
+	if len(errorSlice) > 0 {
+		errStr := "Error(s) found while retrieving files\n"
+		for i, err := range errorSlice {
+			errStr += fmt.Sprintf("\t%d: %s \n", i, err.Error())
+		}
+		return nil, errors.New(errStr)
 	}
 
 	go func() {
@@ -111,7 +151,7 @@ func (b *Bucket) GetMultiple(c *Config, files []string) (*getter, error) {
 		close(batchGetter.readCh)
 	}()
 
-	return batchGetter, err
+	return batchGetter, nil
 }
 
 // GetReader provides a reader and downloads data using parallel ranged get requests.
