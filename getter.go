@@ -146,6 +146,9 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 		g.chunkWg.Done()
 		logger.debugPrintf("ERROR on queueFile", errgo.Mask(err))
 		if resp != nil {
+			if resp.Body != nil {
+				defer resp.Body.Close()
+			}
 			return resp.Header, err
 		}
 		return nil, err
@@ -153,6 +156,9 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 
 	if resp.StatusCode != 200 {
 		g.chunkWg.Done()
+		if resp.Body != nil {
+			defer resp.Body.Close()
+		}
 		logger.debugPrintf("ERROR on queueFile", url.String(), "Header", resp.Header)
 		return resp.Header, fmt.Errorf("Bad status for HTTP response: %d", resp.StatusCode)
 	}
@@ -160,6 +166,9 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 	// Golang changes content-length to -1 when chunked transfer encoding / EOF close response detected
 	if resp.ContentLength == -1 {
 		g.chunkWg.Done()
+		if resp.Body != nil {
+			defer resp.Body.Close()
+		}
 		return resp.Header, fmt.Errorf("Retrieving objects with undefined content-length " +
 			" responses (chunked transfer encoding / EOF close) is not supported")
 	}
@@ -253,10 +262,13 @@ func (g *getter) getChunk(c *chunk) error {
 		respTmp, err := g.c.Client.Do(r)
 		resp = respTmp //Necessary so 'resp' doesn't turn nil
 		if err != nil {
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
 			return err
 		}
 		if resp.StatusCode != 206 {
-			return newRespError(resp)
+			return newRespError(resp) //newRespError will close resp.Body for us
 		}
 	} else {
 		resp = c.response
