@@ -143,6 +143,7 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 
 	// resp could be nil, depending on the error.
 	if err != nil {
+		g.chunkWg.Done()
 		logger.debugPrintf("ERROR on queueFile", errgo.Mask(err))
 		if resp != nil {
 			return resp.Header, err
@@ -151,12 +152,14 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 	}
 
 	if resp.StatusCode != 200 {
+		g.chunkWg.Done()
 		logger.debugPrintf("ERROR on queueFile", url.String(), "Header", resp.Header)
 		return resp.Header, fmt.Errorf("Bad status for HTTP response: %d", resp.StatusCode)
 	}
 
 	// Golang changes content-length to -1 when chunked transfer encoding / EOF close response detected
 	if resp.ContentLength == -1 {
+		g.chunkWg.Done()
 		return resp.Header, fmt.Errorf("Retrieving objects with undefined content-length " +
 			" responses (chunked transfer encoding / EOF close) is not supported")
 	}
@@ -165,7 +168,10 @@ func (g *getter) queueFile(url *url.URL) (http.Header, error) {
 	atomic.AddInt64(&g.chunkTotal, int64((resp.ContentLength + g.bufsz - 1) / g.bufsz))// round up, integer division
 
 	logger.debugPrintf("object size: %3.2g MB", float64(resp.ContentLength)/float64((1*mb)))
-	go g.initChunks(resp, url.String())
+	go func() {
+		g.initChunks(resp, url.String())
+		g.chunkWg.Done()
+	}()
 	return resp.Header, nil
 }
 
@@ -199,7 +205,6 @@ func (g *getter) initChunks(resp *http.Response, path string) {
 		g.wg.Add(1)
 		g.getCh <- c
 	}
-	g.chunkWg.Done()
 }
 
 func (g *getter) worker() {
