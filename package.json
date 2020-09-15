@@ -1,0 +1,30 @@
+{
+  "name": "tune-js-sdk",
+  "version": "2.0.0",
+  "description": "Embedded JS script that allows for direct linking, organic traffic and cookie-less tracking",
+  "main": "/src/sdk.js",
+  "scripts": {
+    "test": "test/run.sh",
+    "clean": "rm -rf dist .cache",
+    "build": "npm run clean && parcel build src/tune.js --public-url ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.corp.tune.com/engineering/HasOffersSolutions/ho-js-sdk"
+  },
+  "author": "TUNE Solutions",
+  "license": "ISC",
+  "devDependencies": {
+    "@babel/core": "^7.10.5",
+    "@babel/preset-env": "^7.10.4",
+    "jest": "^24.9.0",
+    "jest-localstorage-mock": "^2.4.3",
+    "parcel-bundler": "^1.12.4"
+  },
+  "engines": {
+    "node": ">=6.0.0"
+  },
+  "dependencies": {
+    "regenerator-runtime": "^0.13.5"
+  }
+}
